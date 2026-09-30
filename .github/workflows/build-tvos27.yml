@@ -13,205 +13,68 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Show toolchain
         run: |
-          echo "=== Xcode ==="
           xcodebuild -version
-
           echo "=== tvOS SDKs ==="
-          xcodebuild -showsdks | grep -i tvos || true
+          xcodebuild -showsdks | grep -i tvos
 
-      - name: Find Xcode project
-        id: project
+      - name: Apply official tvOS 27 compatibility patch
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          PROJECT=$(find . -name "*.xcodeproj" -type d | head -n 1)
+          PROJECT_DIR="_Project/Browser"
 
-          if [ -z "$PROJECT" ]; then
-            echo "::error::No .xcodeproj found"
-            exit 1
-          fi
+          PLIST="$PROJECT_DIR/Info.plist"
+          HEADER="$PROJECT_DIR/AppDelegate.h"
+          SOURCE="$PROJECT_DIR/AppDelegate.m"
 
-          echo "Project: $PROJECT"
-          echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
+          echo "=== Files ==="
+          ls -l "$PLIST" "$HEADER" "$SOURCE"
 
-      - name: Find Xcode scheme
-        id: scheme
-        shell: bash
-        run: |
-          set -e
-
-          PROJECT="${{ steps.project.outputs.project }}"
-
-          echo "=== Available schemes ==="
-          xcodebuild \
-            -project "$PROJECT" \
-            -list
-
-          SCHEME=$(
-            xcodebuild \
-              -project "$PROJECT" \
-              -list -json |
-            python3 -c '
-          import json, sys
-          data=json.load(sys.stdin)
-          schemes=data.get("project", {}).get("schemes", [])
-          preferred=["tvOSBrowser", "tvOS Browser"]
-          for p in preferred:
-              if p in schemes:
-                  print(p)
-                  sys.exit(0)
-          if schemes:
-              print(schemes[0])
-              sys.exit(0)
-          sys.exit(1)
-          '
-          )
-
-          if [ -z "$SCHEME" ]; then
-            echo "::error::No Xcode scheme found"
-            exit 1
-          fi
-
-          echo "Using scheme: $SCHEME"
-          echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
-
-      - name: Apply tvOS 27 compatibility fix
-        shell: bash
-        run: |
-          set -e
-
-          echo "Searching for Info.plist..."
-          PLIST=$(find . \
-            -name "Info.plist" \
-            -not -path "*/Pods/*" \
-            -not -path "*/DerivedData/*" \
-            | head -n 1)
-
-          if [ -z "$PLIST" ]; then
-            echo "::error::Info.plist not found"
-            exit 1
-          fi
-
-          echo "Using Info.plist: $PLIST"
-
-          echo "=== Current scene configuration ==="
-          /usr/libexec/PlistBuddy -c "Print :UIApplicationSceneManifest" "$PLIST" 2>/dev/null || true
-
-          if /usr/libexec/PlistBuddy -c "Print :UIApplicationSceneManifest" "$PLIST" >/dev/null 2>&1; then
-            echo "UIApplicationSceneManifest already exists."
-          else
-            echo "Adding UIApplicationSceneManifest..."
-
-            /usr/libexec/PlistBuddy \
-              -c "Add :UIApplicationSceneManifest dict" \
-              "$PLIST"
-
-            /usr/libexec/PlistBuddy \
-              -c "Add :UIApplicationSceneManifest:UIApplicationSupportsMultipleScenes bool false" \
-              "$PLIST"
-
-            /usr/libexec/PlistBuddy \
-              -c "Add :UIApplicationSceneManifest:UISceneConfigurations dict" \
-              "$PLIST"
-
-            /usr/libexec/PlistBuddy \
-              -c "Add :UIApplicationSceneManifest:UISceneConfigurations:UIWindowSceneSessionRoleApplication array" \
-              "$PLIST"
-
-            /usr/libexec/PlistBuddy \
-              -c "Add :UIApplicationSceneManifest:UISceneConfigurations:UIWindowSceneSessionRoleApplication:0 dict" \
-              "$PLIST"
-
-            /usr/libexec/PlistBuddy \
-              -c "Add :UIApplicationSceneManifest:UISceneConfigurations:UIWindowSceneSessionRoleApplication:0:UISceneConfigurationName string Default Configuration" \
-              "$PLIST"
-
-            /usr/libexec/PlistBuddy \
-              -c "Add :UIApplicationSceneManifest:UISceneConfigurations:UIWindowSceneSessionRoleApplication:0:UISceneDelegateClassName string AppDelegate" \
-              "$PLIST"
-
-            /usr/libexec/PlistBuddy \
-              -c "Add :UIApplicationSceneManifest:UISceneConfigurations:UIWindowSceneSessionRoleApplication:0:UISceneStoryboardFile string Main" \
-              "$PLIST"
-          fi
-
-          echo "=== Resulting scene configuration ==="
-          /usr/libexec/PlistBuddy \
-            -c "Print :UIApplicationSceneManifest" \
-            "$PLIST"
-
-      - name: Patch AppDelegate for tvOS 27
-        shell: bash
-        run: |
-          set -e
-
-          APP_HEADER=$(find . \
-            -name "AppDelegate.h" \
-            -not -path "*/Pods/*" \
-            -not -path "*/DerivedData/*" \
-            | head -n 1)
-
-          APP_SOURCE=$(find . \
-            -name "AppDelegate.m" \
-            -not -path "*/Pods/*" \
-            -not -path "*/DerivedData/*" \
-            | head -n 1)
-
-          if [ -z "$APP_HEADER" ]; then
-            echo "::error::AppDelegate.h not found"
-            exit 1
-          fi
-
-          if [ -z "$APP_SOURCE" ]; then
-            echo "::error::AppDelegate.m not found"
-            exit 1
-          fi
-
-          echo "Header: $APP_HEADER"
-          echo "Source: $APP_SOURCE"
-
-          python3 <<'PY'
-          import pathlib
-          import re
-
-          header = next(pathlib.Path(".").rglob("AppDelegate.h"))
-          source = next(pathlib.Path(".").rglob("AppDelegate.m"))
-
+          #
           # ------------------------------------------------------------
           # AppDelegate.h
           # ------------------------------------------------------------
+          #
 
-          text = header.read_text()
+          python3 <<'PY'
+          from pathlib import Path
 
-          if "UIWindowSceneDelegate" not in text:
-              pattern = r'(@interface\s+AppDelegate\s*:\s*UIResponder\s*<)UIApplicationDelegate(>)'
+          p = Path("_Project/Browser/AppDelegate.h")
+          s = p.read_text()
 
-              replacement = r'\1UIApplicationDelegate, UIWindowSceneDelegate\2'
+          old = "@interface AppDelegate : UIResponder <UIApplicationDelegate>"
+          new = "@interface AppDelegate : UIResponder <UIApplicationDelegate, UIWindowSceneDelegate>"
 
-              new_text, count = re.subn(pattern, replacement, text, count=1)
+          if new not in s:
+              if old not in s:
+                  raise SystemExit("Could not find AppDelegate interface")
 
-              if count == 0:
-                  raise SystemExit(
-                      f"Could not find AppDelegate interface in {header}"
-                  )
+              s = s.replace(old, new, 1)
+              p.write_text(s)
 
-              header.write_text(new_text)
-              print(f"Patched {header}")
-          else:
-              print(f"{header} already conforms to UIWindowSceneDelegate")
+          print("AppDelegate.h patched")
+          PY
 
+          #
           # ------------------------------------------------------------
           # AppDelegate.m
           # ------------------------------------------------------------
+          #
 
-          text = source.read_text()
+          python3 <<'PY'
+          from pathlib import Path
 
-          methods = r'''
+          p = Path("_Project/Browser/AppDelegate.m")
+          s = p.read_text()
+
+          if "sceneWillResignActive:(UIScene *)scene" not in s:
+
+              methods = r'''
           #pragma mark - tvOS 26/27 Scene Lifecycle
 
           - (void)sceneWillResignActive:(UIScene *)scene
@@ -236,51 +99,79 @@ jobs:
 
           '''
 
-          if "sceneWillResignActive:(UIScene *)scene" not in text:
               marker = "\n@end"
 
-              if marker not in text:
-                  raise SystemExit(
-                      f"Could not find @end in {source}"
-                  )
+              if marker not in s:
+                  raise SystemExit("Could not find @end in AppDelegate.m")
 
-              text = text.replace(
-                  marker,
-                  "\n" + methods + "@end",
-                  1
-              )
+              s = s.replace(marker, "\n" + methods + "@end", 1)
+              p.write_text(s)
 
-              source.write_text(text)
-              print(f"Patched {source}")
-          else:
-              print(f"{source} already contains scene lifecycle methods")
+          print("AppDelegate.m patched")
           PY
 
+          #
+          # ------------------------------------------------------------
+          # Info.plist
+          # ------------------------------------------------------------
+          #
+
+          /usr/libexec/PlistBuddy -c "Delete :UIApplicationSceneManifest" "$PLIST" 2>/dev/null || true
+
+          /usr/libexec/PlistBuddy \
+            -c "Add :UIApplicationSceneManifest dict" \
+            "$PLIST"
+
+          /usr/libexec/PlistBuddy \
+            -c "Add :UIApplicationSceneManifest:UIApplicationSupportsMultipleScenes bool false" \
+            "$PLIST"
+
+          /usr/libexec/PlistBuddy \
+            -c "Add :UIApplicationSceneManifest:UISceneConfigurations dict" \
+            "$PLIST"
+
+          /usr/libexec/PlistBuddy \
+            -c "Add :UIApplicationSceneManifest:UISceneConfigurations:UIWindowSceneSessionRoleApplication array" \
+            "$PLIST"
+
+          /usr/libexec/PlistBuddy \
+            -c "Add :UIApplicationSceneManifest:UISceneConfigurations:UIWindowSceneSessionRoleApplication:0 dict" \
+            "$PLIST"
+
+          /usr/libexec/PlistBuddy \
+            -c "Add :UIApplicationSceneManifest:UISceneConfigurations:UIWindowSceneSessionRoleApplication:0:UISceneConfigurationName string Default Configuration" \
+            "$PLIST"
+
+          /usr/libexec/PlistBuddy \
+            -c "Add :UIApplicationSceneManifest:UISceneConfigurations:UIWindowSceneSessionRoleApplication:0:UISceneDelegateClassName string AppDelegate" \
+            "$PLIST"
+
+          /usr/libexec/PlistBuddy \
+            -c "Add :UIApplicationSceneManifest:UISceneConfigurations:UIWindowSceneSessionRoleApplication:0:UISceneStoryboardFile string Main" \
+            "$PLIST"
+
+          echo
           echo "=== AppDelegate.h ==="
-          cat "$APP_HEADER"
+          cat "$HEADER"
 
-          echo "=== Scene lifecycle methods ==="
-          grep -n -A6 -B2 "sceneWillResignActive" "$APP_SOURCE" || true
+          echo
+          echo "=== Scene methods ==="
+          grep -n -A5 -B2 "sceneWillResignActive" "$SOURCE"
 
-      - name: Build unsigned app
+          echo
+          echo "=== Scene manifest ==="
+          /usr/libexec/PlistBuddy \
+            -c "Print :UIApplicationSceneManifest" \
+            "$PLIST"
+
+      - name: Build
         shell: bash
         run: |
-          set -e
-
-          PROJECT="${{ steps.project.outputs.project }}"
-          SCHEME="${{ steps.scheme.outputs.scheme }}"
-
-          rm -rf build
-          mkdir -p build
-
-          echo "Building:"
-          echo "  Project: $PROJECT"
-          echo "  Scheme:  $SCHEME"
-          echo "  SDK:     appletvos27.0"
+          set -o pipefail
 
           xcodebuild \
-            -project "$PROJECT" \
-            -scheme "$SCHEME" \
+            -project "_Project/Browser.xcodeproj" \
+            -scheme "Browser" \
             -configuration Release \
             -sdk appletvos27.0 \
             -destination "generic/platform=tvOS" \
@@ -291,60 +182,40 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
-            build
+            build 2>&1 | tee xcodebuild.log
 
-      - name: Locate built app
+      - name: Show build errors
+        if: failure()
+        run: |
+          echo "=== Compiler errors ==="
+          grep -n -E "error:|fatal error:|warning:" xcodebuild.log || true
+
+          echo
+          echo "=== Last 150 lines ==="
+          tail -150 xcodebuild.log
+
+      - name: Locate application
         id: app
         shell: bash
         run: |
           set -e
 
           APP=$(find "$PWD/build" \
-            -maxdepth 2 \
-            -name "*.app" \
+            -maxdepth 3 \
             -type d \
+            -name "*.app" \
             | head -n 1)
 
           if [ -z "$APP" ]; then
-            echo "::error::No .app found"
-            echo "Build directory:"
+            echo "::error::No .app was produced"
             find "$PWD/build" -maxdepth 4 -print
             exit 1
           fi
 
-          echo "Found app:"
-          echo "$APP"
-
+          echo "Application: $APP"
           echo "app=$APP" >> "$GITHUB_OUTPUT"
 
-      - name: Verify app
-        shell: bash
-        run: |
-          set -e
-
-          APP="${{ steps.app.outputs.app }}"
-
-          echo "=== App contents ==="
-          find "$APP" -maxdepth 2 -type f | head -100
-
-          echo
-          echo "=== Bundle identifier ==="
-          /usr/libexec/PlistBuddy \
-            -c "Print :CFBundleIdentifier" \
-            "$APP/Info.plist"
-
-          echo
-          echo "=== Bundle version ==="
-          /usr/libexec/PlistBuddy \
-            -c "Print :CFBundleShortVersionString" \
-            "$APP/Info.plist" 2>/dev/null || true
-
-          echo
-          echo "=== Code signature ==="
-          codesign -dv "$APP" 2>&1 || true
-
-      - name: Create unsigned IPA
-        shell: bash
+      - name: Create IPA
         run: |
           set -e
 
@@ -357,20 +228,17 @@ jobs:
 
           cd ipa
 
-          zip -r \
-            -q \
+          zip -r -q \
             "../tvOSBrowser-tvOS27-unsigned.ipa" \
             Payload
 
           cd ..
 
-          echo "=== IPA ==="
           ls -lh tvOSBrowser-tvOS27-unsigned.ipa
 
-      - name: Upload unsigned IPA
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: tvOSBrowser-tvOS27-unsigned
           path: tvOSBrowser-tvOS27-unsigned.ipa
-          if-no-files-found: error
           retention-days: 30
