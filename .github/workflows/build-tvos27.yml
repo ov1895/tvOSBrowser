@@ -42,7 +42,9 @@ jobs:
           ls -l "$PLIST" "$HEADER" "$SOURCE"
 
           #
+          # ------------------------------------------------------------
           # AppDelegate.h
+          # ------------------------------------------------------------
           #
 
           python3 <<'PY'
@@ -67,7 +69,9 @@ jobs:
           PY
 
           #
+          # ------------------------------------------------------------
           # AppDelegate.m
+          # ------------------------------------------------------------
           #
 
           python3 <<'PY'
@@ -76,12 +80,7 @@ jobs:
           p = Path("_Project/Browser/AppDelegate.m")
           s = p.read_text()
 
-          if "sceneWillResignActive:(UIScene *)scene" in s:
-              print("Scene lifecycle methods already present")
-          else:
-              methods = r'''
-          #pragma mark - tvOS 26/27 Scene Lifecycle
-
+          methods = r'''
           - (void)sceneWillResignActive:(UIScene *)scene
           {
               [self saveCookiesToDefaults];
@@ -104,25 +103,41 @@ jobs:
 
           '''
 
-              marker = "\n@end"
+          if "sceneWillResignActive:(UIScene *)scene" in s:
+              print("Scene lifecycle methods already present")
+              raise SystemExit(0)
 
-              if marker not in s:
-                  raise SystemExit(
-                      "Could not find @end in AppDelegate.m"
-                  )
+          implementation_marker = "@implementation AppDelegate"
 
-              s = s.replace(
-                  marker,
-                  "\n" + methods + "@end",
-                  1
+          if implementation_marker not in s:
+              raise SystemExit(
+                  "Could not find @implementation AppDelegate"
               )
 
-              p.write_text(s)
-              print("AppDelegate.m patched")
+          # IMPORTANT:
+          # Insert after @implementation AppDelegate, NOT into
+          # the private @interface AppDelegate () section.
+          insert_position = s.index(implementation_marker)
+          insert_position = s.index(
+              "\n",
+              insert_position
+          ) + 1
+
+          s = (
+              s[:insert_position]
+              + methods
+              + s[insert_position:]
+          )
+
+          p.write_text(s)
+
+          print("AppDelegate.m patched successfully")
           PY
 
           #
+          # ------------------------------------------------------------
           # Info.plist
+          # ------------------------------------------------------------
           #
 
           echo
@@ -165,14 +180,17 @@ jobs:
             "$PLIST"
 
           echo
+          echo "============================================================"
+          echo "                  PATCH VERIFICATION"
+          echo "============================================================"
+
+          echo
           echo "=== AppDelegate.h ==="
           cat "$HEADER"
 
           echo
-          echo "=== Scene lifecycle methods ==="
-          grep -n -A6 -B2 \
-            "sceneWillResignActive" \
-            "$SOURCE" || true
+          echo "=== AppDelegate.m ==="
+          cat "$SOURCE"
 
           echo
           echo "=== Scene manifest ==="
@@ -268,6 +286,7 @@ jobs:
 
             echo
             echo "=== Build directory ==="
+
             find "$PWD/build" \
               -maxdepth 5 \
               -print || true
@@ -293,12 +312,14 @@ jobs:
 
           echo
           echo "=== Bundle identifier ==="
+
           /usr/libexec/PlistBuddy \
             -c "Print :CFBundleIdentifier" \
             "$APP/Info.plist"
 
           echo
           echo "=== Bundle version ==="
+
           /usr/libexec/PlistBuddy \
             -c "Print :CFBundleShortVersionString" \
             "$APP/Info.plist" \
@@ -306,6 +327,7 @@ jobs:
 
           echo
           echo "=== Bundle version number ==="
+
           /usr/libexec/PlistBuddy \
             -c "Print :CFBundleVersion" \
             "$APP/Info.plist" \
@@ -313,10 +335,12 @@ jobs:
 
           echo
           echo "=== Code signature ==="
+
           codesign -dv "$APP" 2>&1 || true
 
           echo
           echo "=== App contents ==="
+
           find "$APP" \
             -maxdepth 2 \
             -type f \
@@ -347,6 +371,7 @@ jobs:
 
           echo
           echo "=== IPA created ==="
+
           ls -lh \
             tvOSBrowser-tvOS27-unsigned.ipa
 
