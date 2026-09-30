@@ -16,12 +16,18 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Show toolchain
+        shell: bash
         run: |
-          xcodebuild -version
-          echo "=== tvOS SDKs ==="
-          xcodebuild -showsdks | grep -i tvos
+          set -e
 
-      - name: Apply official tvOS 27 compatibility patch
+          echo "=== Xcode ==="
+          xcodebuild -version
+
+          echo
+          echo "=== tvOS SDKs ==="
+          xcodebuild -showsdks | grep -i tvos || true
+
+      - name: Apply tvOS 27 compatibility patch
         shell: bash
         run: |
           set -euo pipefail
@@ -36,9 +42,7 @@ jobs:
           ls -l "$PLIST" "$HEADER" "$SOURCE"
 
           #
-          # ------------------------------------------------------------
           # AppDelegate.h
-          # ------------------------------------------------------------
           #
 
           python3 <<'PY'
@@ -50,20 +54,20 @@ jobs:
           old = "@interface AppDelegate : UIResponder <UIApplicationDelegate>"
           new = "@interface AppDelegate : UIResponder <UIApplicationDelegate, UIWindowSceneDelegate>"
 
-          if new not in s:
-              if old not in s:
-                  raise SystemExit("Could not find AppDelegate interface")
-
+          if new in s:
+              print("AppDelegate.h already patched")
+          elif old in s:
               s = s.replace(old, new, 1)
               p.write_text(s)
-
-          print("AppDelegate.h patched")
+              print("AppDelegate.h patched")
+          else:
+              raise SystemExit(
+                  "Could not find expected AppDelegate interface"
+              )
           PY
 
           #
-          # ------------------------------------------------------------
           # AppDelegate.m
-          # ------------------------------------------------------------
           #
 
           python3 <<'PY'
@@ -72,8 +76,9 @@ jobs:
           p = Path("_Project/Browser/AppDelegate.m")
           s = p.read_text()
 
-          if "sceneWillResignActive:(UIScene *)scene" not in s:
-
+          if "sceneWillResignActive:(UIScene *)scene" in s:
+              print("Scene lifecycle methods already present")
+          else:
               methods = r'''
           #pragma mark - tvOS 26/27 Scene Lifecycle
 
@@ -102,21 +107,30 @@ jobs:
               marker = "\n@end"
 
               if marker not in s:
-                  raise SystemExit("Could not find @end in AppDelegate.m")
+                  raise SystemExit(
+                      "Could not find @end in AppDelegate.m"
+                  )
 
-              s = s.replace(marker, "\n" + methods + "@end", 1)
+              s = s.replace(
+                  marker,
+                  "\n" + methods + "@end",
+                  1
+              )
+
               p.write_text(s)
-
-          print("AppDelegate.m patched")
+              print("AppDelegate.m patched")
           PY
 
           #
-          # ------------------------------------------------------------
           # Info.plist
-          # ------------------------------------------------------------
           #
 
-          /usr/libexec/PlistBuddy -c "Delete :UIApplicationSceneManifest" "$PLIST" 2>/dev/null || true
+          echo
+          echo "=== Updating Info.plist ==="
+
+          /usr/libexec/PlistBuddy \
+            -c "Delete :UIApplicationSceneManifest" \
+            "$PLIST" 2>/dev/null || true
 
           /usr/libexec/PlistBuddy \
             -c "Add :UIApplicationSceneManifest dict" \
@@ -155,8 +169,10 @@ jobs:
           cat "$HEADER"
 
           echo
-          echo "=== Scene methods ==="
-          grep -n -A5 -B2 "sceneWillResignActive" "$SOURCE"
+          echo "=== Scene lifecycle methods ==="
+          grep -n -A6 -B2 \
+            "sceneWillResignActive" \
+            "$SOURCE" || true
 
           echo
           echo "=== Scene manifest ==="
@@ -167,7 +183,11 @@ jobs:
       - name: Build
         shell: bash
         run: |
-          set -o pipefail
+          set +e
+
+          echo "============================================================"
+          echo "                    STARTING XCODEBUILD"
+          echo "============================================================"
 
           xcodebuild \
             -project "_Project/Browser.xcodeproj" \
@@ -184,21 +204,58 @@ jobs:
             PROVISIONING_PROFILE_SPECIFIER="" \
             build 2>&1 | tee xcodebuild.log
 
-      - name: Show build errors
-        if: failure()
-        run: |
-          echo "=== Compiler errors ==="
-          grep -n -E "error:|fatal error:|warning:" xcodebuild.log || true
+          BUILD_RESULT=${PIPESTATUS[0]}
 
           echo
-          echo "=== Last 150 lines ==="
-          tail -150 xcodebuild.log
+          echo "============================================================"
+          echo "                 XCODEBUILD DIAGNOSTICS"
+          echo "============================================================"
+
+          echo
+          echo "=== All compiler errors ==="
+
+          grep -n -B3 -A8 \
+            -E "error:|fatal error:" \
+            xcodebuild.log || true
+
+          echo
+          echo "=== AppDelegate diagnostics ==="
+
+          grep -n -B5 -A10 \
+            "AppDelegate.m" \
+            xcodebuild.log | \
+            grep -E \
+            "error:|warning:|AppDelegate.m" \
+            || true
+
+          echo
+          echo "=== Last 200 lines of build log ==="
+
+          tail -200 xcodebuild.log
+
+          echo
+          echo "============================================================"
+          echo "                 BUILD RESULT: $BUILD_RESULT"
+          echo "============================================================"
+
+          exit "$BUILD_RESULT"
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Locate application
         id: app
         shell: bash
         run: |
           set -e
+
+          echo "=== Searching for .app ==="
 
           APP=$(find "$PWD/build" \
             -maxdepth 3 \
@@ -208,18 +265,71 @@ jobs:
 
           if [ -z "$APP" ]; then
             echo "::error::No .app was produced"
-            find "$PWD/build" -maxdepth 4 -print
+
+            echo
+            echo "=== Build directory ==="
+            find "$PWD/build" \
+              -maxdepth 5 \
+              -print || true
+
             exit 1
           fi
 
-          echo "Application: $APP"
+          echo
+          echo "Application found:"
+          echo "$APP"
+
           echo "app=$APP" >> "$GITHUB_OUTPUT"
 
-      - name: Create IPA
+      - name: Verify application
+        shell: bash
         run: |
           set -e
 
           APP="${{ steps.app.outputs.app }}"
+
+          echo "=== Application ==="
+          echo "$APP"
+
+          echo
+          echo "=== Bundle identifier ==="
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleIdentifier" \
+            "$APP/Info.plist"
+
+          echo
+          echo "=== Bundle version ==="
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleShortVersionString" \
+            "$APP/Info.plist" \
+            2>/dev/null || true
+
+          echo
+          echo "=== Bundle version number ==="
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleVersion" \
+            "$APP/Info.plist" \
+            2>/dev/null || true
+
+          echo
+          echo "=== Code signature ==="
+          codesign -dv "$APP" 2>&1 || true
+
+          echo
+          echo "=== App contents ==="
+          find "$APP" \
+            -maxdepth 2 \
+            -type f \
+            | head -100
+
+      - name: Create unsigned IPA
+        shell: bash
+        run: |
+          set -e
+
+          APP="${{ steps.app.outputs.app }}"
+
+          echo "Creating unsigned IPA..."
 
           rm -rf ipa
           mkdir -p ipa/Payload
@@ -228,17 +338,22 @@ jobs:
 
           cd ipa
 
-          zip -r -q \
+          zip -r \
+            -q \
             "../tvOSBrowser-tvOS27-unsigned.ipa" \
             Payload
 
           cd ..
 
-          ls -lh tvOSBrowser-tvOS27-unsigned.ipa
+          echo
+          echo "=== IPA created ==="
+          ls -lh \
+            tvOSBrowser-tvOS27-unsigned.ipa
 
-      - name: Upload IPA
+      - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
           name: tvOSBrowser-tvOS27-unsigned
           path: tvOSBrowser-tvOS27-unsigned.ipa
+          if-no-files-found: error
           retention-days: 30
